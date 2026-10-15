@@ -1,0 +1,4 @@
+build/
+.DS_Store
+demo/frames/
+*.mp4
