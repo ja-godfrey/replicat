@@ -386,6 +386,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
   var ticker: Timer?
   var toolbarHidden = false
   var selected = false                                  // you last clicked the toolbar
+  var handBack: NSRunningApplication?                   // the app that was active before Replicat
 
   // ---- settings ----
   let defaults = UserDefaults.standard
@@ -468,7 +469,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     panel.hasShadow = true
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
     panel.delegate = self
-    panel.onClick = { [weak self] in self?.selected = true; self?.refresh() }
+    // Clicking the idle toolbar makes Replicat the active app, so ⌘Q, ⌘O and ⌘S
+    // reach it; recording and playback hand focus straight back (returnFocus).
+    panel.onClick = { [weak self] in
+      guard let self else { return }
+      self.selected = true
+      if !(self.recorder.isRecording || self.player.isPlaying || self.countdown > 0) { self.activateSelf() }
+      self.refresh()
+    }
     // The toolbar never takes focus from your app, so "selected" ends at your next
     // click or keypress anywhere else (another app, or the same app you were in).
     NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] _ in
@@ -634,7 +642,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     a.accessoryView = field
     a.addButton(withTitle: "Set"); a.addButton(withTitle: "Cancel")
     a.window.initialFirstResponder = field
-    NSApp.activate(ignoringOtherApps: true)
+    activateSelf()
     guard a.runModal() == .alertFirstButtonReturn else { return }
     let text = field.stringValue.trimmingCharacters(in: .whitespaces)
       .replacingOccurrences(of: "×", with: "").replacingOccurrences(of: "x", with: "")
@@ -737,6 +745,22 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
   func stopTicker() { ticker?.invalidate(); ticker = nil }
 
+  /// Bring Replicat forward, remembering which app to give focus back to.
+  func activateSelf() {
+    if !NSApp.isActive, let front = NSWorkspace.shared.frontmostApplication,
+       front.processIdentifier != ProcessInfo.processInfo.processIdentifier { handBack = front }
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  /// Give focus back to the app you were in, so a macro's typing lands there and
+  /// not in Replicat. true if focus had to move (callers give it a moment).
+  @discardableResult func returnFocus() -> Bool {
+    defer { handBack = nil }
+    guard NSApp.isActive, let app = handBack, !app.isTerminated else { return false }
+    app.activate()
+    return true
+  }
+
   // ---- actions ----
   @objc func toggleRecord() {
     if player.isPlaying || countdown > 0 { return }
@@ -747,6 +771,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
       if macro.steps.isEmpty { notice = ("Nothing recorded", Date().addingTimeInterval(4)) }
     } else {
       guard AXIsProcessTrusted(), recorder.begin() else { NSSound.beep(); refresh(); return }
+      returnFocus()
       startTicker(1)
     }
     showPanel(); refresh()
@@ -759,6 +784,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     guard AXIsProcessTrusted(), !macro.steps.isEmpty else { NSSound.beep(); refresh(); return }
     guard screensOK() else { return }
     if useCountdown {
+      returnFocus()
       countdown = 3
       stopTicker()
       ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] t in
@@ -777,6 +803,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   func startPlaying() {
+    if returnFocus() {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.beginPlayback() }
+      return
+    }
+    beginPlayback()
+  }
+
+  func beginPlayback() {
     player.stopOnMouse = stopOnMouse
     player.play(playable, speed: speed, repeats: repeats) { [weak self] why in
       guard let self else { return }
@@ -806,7 +840,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     a.informativeText = info
     a.alertStyle = .warning
     a.addButton(withTitle: "Cancel"); a.addButton(withTitle: "Play Anyway")
-    NSApp.activate(ignoringOtherApps: true)
+    activateSelf()
     return a.runModal() == .alertSecondButtonReturn
   }
 
@@ -814,7 +848,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let p = NSOpenPanel()
     p.allowedContentTypes = [.init(filenameExtension: "replicat")!]
     p.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-    NSApp.activate(ignoringOtherApps: true)
+    activateSelf()
     if p.runModal() == .OK, let u = p.url { _ = load(u) }
   }
 
@@ -831,7 +865,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     p.allowedContentTypes = [.init(filenameExtension: "replicat")!]
     p.nameFieldStringValue = (fileName ?? "macro") + ".replicat"
     p.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-    NSApp.activate(ignoringOtherApps: true)
+    activateSelf()
     if p.runModal() == .OK, let u = p.url {
       do { try MacroFile.write(macro, to: u); fileName = u.deletingPathExtension().lastPathComponent }
       catch { NSAlert(error: error).runModal() }
